@@ -1,6 +1,5 @@
 package com.vynatix
 
-///////////// example
 class LoggingMiddleware<T : Vault<T>>(
     private val options: Options = Options()
 ) : Middleware<T>() {
@@ -18,14 +17,8 @@ class LoggingMiddleware<T : Vault<T>>(
 
     interface LogFormatter {
         fun formatStart(context: MiddlewareContext<*>): String
-        fun formatComplete(context: MiddlewareContext<*>, durationMs: Long, stateDiff: Map<State<*>, StateDiff>): String
-        fun formatError(
-            context: MiddlewareContext<*>,
-            error: Throwable,
-            durationMs: Long,
-            stateDiff: Map<State<*>, StateDiff>
-        ): String
-
+        fun formatComplete(context: MiddlewareContext<*>, durationMs: Long): String
+        fun formatError(context: MiddlewareContext<*>, error: Throwable, durationMs: Long): String
         fun formatStateChange(context: MiddlewareContext<*>, state: State<*>, oldValue: Any, newValue: Any): String
 
         fun formatValue(value: Any?): String = when (value) {
@@ -39,75 +32,40 @@ class LoggingMiddleware<T : Vault<T>>(
         }
     }
 
-    data class StateDiff(
-        val propertyName: String,
-        val oldValue: Any?,
-        val newValue: Any?,
-        val changeType: ChangeType
-    )
-
-    enum class ChangeType {
-        MODIFIED, ADDED
-    }
-
     class DefaultLogFormatter : LogFormatter {
         override fun formatStart(context: MiddlewareContext<*>): String {
             return buildString {
-                append("🔵 Transaction started: ${context.transaction.useCaseId}")
+                append("🔵 Transaction started: ${context.transaction.id}")
                 if (context.metadata.isNotEmpty()) {
                     append(" [Metadata: ${context.metadata}]")
                 }
             }
         }
 
-        override fun formatComplete(
-            context: MiddlewareContext<*>,
-            durationMs: Long,
-            stateDiff: Map<State<*>, StateDiff>
-        ): String {
+        override fun formatComplete(context: MiddlewareContext<*>, durationMs: Long): String {
             return buildString {
-                appendLine("✅ Transaction completed: ${context.transaction.useCaseId}")
+                appendLine("✅ Transaction completed: ${context.transaction.id}")
                 append("   Duration: ${durationMs}ms")
-
-                if (stateDiff.isNotEmpty()) {
-                    appendLine("\n   State changes:")
-                    stateDiff.values.forEach { diff ->
-                        appendLine("   - ${diff.propertyName}:")
-                        appendLine("     Before: ${formatValue(diff.oldValue)}")
-                        appendLine("     After:  ${formatValue(diff.newValue)}")
-                    }
+                appendLine("\n   Current state:")
+                context.vault.properties.forEach { (name, state) ->
+                    appendLine("   - $name: ${formatValue(state.invoke())}")
                 }
             }
         }
 
-        override fun formatError(
-            context: MiddlewareContext<*>,
-            error: Throwable,
-            durationMs: Long,
-            stateDiff: Map<State<*>, StateDiff>
-        ): String {
+        override fun formatError(context: MiddlewareContext<*>, error: Throwable, durationMs: Long): String {
             return buildString {
-                appendLine("❌ Transaction failed: ${context.transaction.useCaseId}")
+                appendLine("❌ Transaction failed: ${context.transaction.id}")
                 appendLine("   Duration: ${durationMs}ms")
                 appendLine("   Error: ${error.message}")
-
-                if (stateDiff.isNotEmpty()) {
-                    appendLine("   Attempted state changes:")
-                    stateDiff.values.forEach { diff ->
-                        appendLine("   - ${diff.propertyName}:")
-                        appendLine("     Before: ${formatValue(diff.oldValue)}")
-                        appendLine("     After:  ${formatValue(diff.newValue)}")
-                    }
+                appendLine("   Current state:")
+                context.vault.properties.forEach { (name, state) ->
+                    appendLine("   - $name: ${formatValue(state.invoke())}")
                 }
             }
         }
 
-        override fun formatStateChange(
-            context: MiddlewareContext<*>,
-            state: State<*>,
-            oldValue: Any,
-            newValue: Any
-        ): String {
+        override fun formatStateChange(context: MiddlewareContext<*>, state: State<*>, oldValue: Any, newValue: Any): String {
             return buildString {
                 append("📝 State changed: ")
                 append(context.vault.properties.entries.find { it.value == state }?.key ?: "unknown")
@@ -123,7 +81,7 @@ class LoggingMiddleware<T : Vault<T>>(
         startTime = System.currentTimeMillis()
         log(options.formatter.formatStart(context))
 
-        // Log and capture initial state of all properties
+        // Log and capture initial state
         context.vault.properties.forEach { (name, state) ->
             try {
                 val value = state.invoke()
@@ -137,7 +95,6 @@ class LoggingMiddleware<T : Vault<T>>(
 
     override fun onTransactionCompleted(context: MiddlewareContext<T>) {
         val duration = System.currentTimeMillis() - startTime
-        val stateDiff = calculateStateDiff(context)
 
         // Log mutations that were attempted
         context.transaction.modifiedProperties.forEach { state ->
@@ -147,46 +104,18 @@ class LoggingMiddleware<T : Vault<T>>(
             log("  Current value: ${formatValue(state.invoke())}")
         }
 
-        log(options.formatter.formatComplete(context, duration, stateDiff))
+        log(options.formatter.formatComplete(context, duration))
         stateSnapshots.clear()
     }
 
     override fun onTransactionError(context: MiddlewareContext<T>, error: Throwable) {
         val duration = System.currentTimeMillis() - startTime
-        val stateDiff = calculateStateDiff(context)
-        log(options.formatter.formatError(context, error, duration, stateDiff))
+        log(options.formatter.formatError(context, error, duration))
 
         if (options.includeStackTrace) {
             log(error.stackTraceToString())
         }
         stateSnapshots.clear()
-    }
-
-    private fun calculateStateDiff(context: MiddlewareContext<T>): Map<State<*>, StateDiff> {
-        val diff = mutableMapOf<State<*>, StateDiff>()
-
-        context.vault.properties.forEach { (name, state) ->
-            try {
-                val oldValue = stateSnapshots[state]
-                val newValue = state.invoke()
-
-                if (oldValue != newValue || state in context.transaction.modifiedProperties) {
-                    diff[state] = StateDiff(
-                        propertyName = name,
-                        oldValue = oldValue,
-                        newValue = newValue,
-                        changeType = when {
-                            oldValue == null -> ChangeType.ADDED
-                            else -> ChangeType.MODIFIED
-                        }
-                    )
-                }
-            } catch (e: Exception) {
-                log("Failed to calculate diff for $name: ${e.message}")
-            }
-        }
-
-        return diff
     }
 
     private fun formatValue(value: Any?): String = options.formatter.formatValue(value)

@@ -48,18 +48,21 @@ class IsLoggedInRepository : Repository<Boolean> {
     override fun flow(): SharedFlow<Boolean> = _dataFlow.asSharedFlow()
 }
 
+
 class UserVault : Vault<UserVault>() {
-    val username by state(MutableStateFlow("none"))
+    val username by state { "none" }
     val email by state { "none" }
     val loginAttempts by state { 0 }
     val isLoggedIn by state { false }
+
 }
 
 class LoginAction : Action<UserVault> {
     override fun invoke(vault: UserVault) = vault {
         loginAttempts mutate 1
         isLoggedIn mutate true
-        username mutate "Osama Raddad"
+        username mutate "John Doe"
+        email mutate "john@doe.com"
     }
 }
 
@@ -78,7 +81,7 @@ fun main() = runBlocking {
 
     val loggingMiddleware = LoggingMiddleware<UserVault>(
         options = LoggingMiddleware.Options(
-            logLevel = LoggingMiddleware.LogLevel.DEBUG,
+            logLevel = LoggingMiddleware.LogLevel.INFO,
             includeStackTrace = true,
             includeStateValues = true
         )
@@ -93,13 +96,15 @@ fun main() = runBlocking {
     }
     val loginEffect = LoginEffect(userVault)
 
-    val result: TransactionResult = userVault {
-        username effect ::println
-        email effect ::println
+    userVault {
+        username effect Effect { println("Username: $it") }
+        email effect { println("Email: $it") }
         loginAttempts effect ::println
         isLoggedIn effect loginEffect
+    }
 
-        this action LoginAction()
+    val result: TransactionResult = userVault {
+        return@userVault this action LoginAction()
     }
 
     when (result) {
