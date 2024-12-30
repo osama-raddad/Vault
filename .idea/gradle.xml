@@ -9,6 +9,8 @@
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/Logging" />
+            <option value="$PROJECT_DIR$/demo" />
           </set>
         </option>
       </GradleProjectSettings>

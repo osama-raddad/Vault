@@ -1,217 +1,470 @@
-# 🔒 Vault.kt
+# Vault: Type-safe State Management for Kotlin
 
-> Transaction-safe state management for Kotlin coroutines that just works.
+## Table of Contents
+- [Overview](#overview)
+- [Core Concepts](#core-concepts)
+- [Architecture](#architecture)
+- [Getting Started](#getting-started)
+- [Advanced Features](#advanced-features)
+- [Best Practices](#best-practices)
+- [API Reference](#api-reference)
+- [Performance Considerations](#performance-considerations)
+- [Troubleshooting](#troubleshooting)
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/badge/release-3.17.4-green.svg)](https://github.com/vynatix/vault/releases)
-[![Kotlin](https://img.shields.io/badge/kotlin-1.9.0-orange.svg)](https://kotlinlang.org)
+## Overview
 
-Vault is a revolutionary state management library that brings the power of database transactions to your application state. Built from the ground up for Kotlin, it combines bulletproof reliability with elegant syntax and seamless coroutine integration.
+Vault is a modern state management library for Kotlin applications that combines type safety with powerful reactive features. Built on Kotlin coroutines and Flow, it provides a robust foundation for managing complex application state with confidence.
 
-## ✨ Why Vault?
+### Key Features
+
+| Feature | Description | Benefits |
+|---------|-------------|-----------|
+| 🔒 Type Safety | Complete compile-time type checking | Catch errors early, improve refactoring confidence |
+| ⚡ High Performance | Object pooling and coroutines | Efficient memory usage, responsive applications |
+| 🔄 Reactive Updates | Built on Kotlin Flow | Real-time updates, declarative data flow |
+| 🛡️ Transactions | Atomic state changes | Data consistency, easy rollbacks |
+| 🔌 Middleware | Extensible pipeline | Logging, monitoring, validation |
+| 🎯 Effects | Side-effect management | Clean architecture, predictable behavior |
+| 📊 Debugging | Comprehensive logging | Easy troubleshooting |
+| 🧪 Testing | First-class testing support | Reliable code, confident releases |
+
+## Core Concepts
+
+### Architecture Overview
+
+```mermaid
+flowchart TB
+    subgraph Client[Client Code]
+        A[Action] --> V
+    end
+    
+    subgraph Vault[Vault]
+        V[Transaction] --> M
+        M[Middleware Chain] --> S
+        S[State Changes]
+    end
+    
+    subgraph Storage[Storage Layer]
+        S --> R[Repository]
+        R --> E[Effects]
+    end
+    
+    style Client fill:#e1f5fe
+    style Vault fill:#fff3e0
+    style Storage fill:#f1f8e9
+```
+
+### State Lifecycle
+
+```mermaid
+flowchart TB
+    subgraph "State Lifecycle"
+        I[Initial State] --> A
+        A[Action Triggered] --> T[Transaction Created]
+        T --> V{Validation}
+        V -->|Valid| M[Middleware Chain]
+        V -->|Invalid| E[Error]
+        M --> S[State Update]
+        S --> R[Repository Persistence]
+        R --> F[Flow Updates]
+        F --> EF[Effects Triggered]
+        EF --> C[Transaction Complete]
+    end
+
+    style I fill:#e3f2fd
+    style A fill:#fff3e0
+    style T fill:#fff3e0
+    style V fill:#ffebee
+    style M fill:#f3e5f5
+    style S fill:#e8f5e9
+    style R fill:#e8f5e9
+    style F fill:#e8f5e9
+    style EF fill:#e8f5e9
+    style C fill:#e1f5fe
+```
+
+### Middleware Chain
+
+```mermaid
+sequenceDiagram
+    participant A as Action
+    participant L as LoggingMiddleware
+    participant V as ValidationMiddleware
+    participant P as PerformanceMiddleware
+    participant S as State
+
+    A->>L: Begin Transaction
+    activate L
+    L->>V: Process
+    activate V
+    V->>P: Process
+    activate P
+    P->>S: Update State
+    S-->>P: State Updated
+    deactivate P
+    P-->>V: Complete
+    deactivate V
+    V-->>L: Complete
+    deactivate L
+    L-->>A: Transaction Complete
+```
+
+## Getting Started
+
+### Installation
+
+Add Vault to your project:
+
+```kotlin
+// build.gradle.kts
+dependencies {
+    implementation("com.vynatix:vault:1.0.0")
+}
+```
+
+### Basic Usage
+
+1. Define your state container:
 
 ```kotlin
 class UserVault : Vault<UserVault>() {
-    val username by asset { "none" }
-    val isLoggedIn by asset { false }
-}
-
-// Atomic operations with automatic rollback
-val result = userVault {
-    username mutate "Jane Doe"
-    isLoggedIn mutate true
-    // If anything fails, everything rolls back automatically!
-}
-```
-
-### 🚀 Key Features
-
-- **Transactional Safety**: Every state change is wrapped in a transaction that either succeeds completely or rolls back automatically
-- **Zero Boilerplate**: Property delegation and clean syntax make state management a breeze
-- **Type-Safe by Design**: Leverage Kotlin's type system for compile-time safety
-- **High Performance**: Optimized with object pooling and efficient state tracking
-- **Built for Scale**: From small apps to enterprise systems, Vault grows with you
-- **Coroutine Integration**: Built on Kotlin Flow for seamless reactivity
-- **Direct binding**: Direct binding to data sources through the repository pattern
-
-## 📦 Installation
-
-Add Vault to your project in just one line:
-
-```kotlin
-implementation("com.vynatix:vault:3.17.4")
-```
-
-## 🎯 Quick Start
-
-### 1. Define Your State
-
-```kotlin
-class ProfileVault : Vault<ProfileVault>() {
-    val name by asset { "" }
-    val bio by asset { "" }
-    val socialLinks by asset { listOf<String>() }
+    // States are declared using property delegation
+    val username by state { "guest" }
+    val isLoggedIn by state { false }
+    val profile by state { UserProfile() }
+    
+    // Custom data classes can be used as states
+    data class UserProfile(
+        val firstName: String = "",
+        val lastName: String = "",
+        val email: String = ""
+    )
 }
 ```
 
-### 2. Create Your Repositories
+2. Create actions for state modifications:
 
 ```kotlin
-class NameRepository : IRepository<String> {
-    private val _dataFlow = MutableSharedFlow<String>(replay = 1)
+class LoginAction(
+    private val username: String,
+    private val profile: UserVault.UserProfile
+) : Action<UserVault> {
+    override fun invoke(vault: UserVault) = vault {
+        // Multiple state changes in a single transaction
+        username mutate username
+        profile mutate profile
+        isLoggedIn mutate true
+    }
+}
+```
+
+3. Set up repositories for persistence:
+
+```kotlin
+class UserRepository : Repository<String> {
+    private val _dataFlow = MutableStateFlow("guest")
+    
+    override fun set(value: String): Boolean {
+        // Validate and persist state changes
+        if (value.isBlank()) return false
+        _dataFlow.value = value
+        return true
+    }
+    
     override fun flow(): SharedFlow<String> = _dataFlow.asSharedFlow()
-    override fun set(value: String) = _dataFlow.tryEmit(value)
 }
 ```
 
-### 3. Connect and Operate
+4. Configure middleware for cross-cutting concerns:
 
 ```kotlin
-val vault = ProfileVault()
-vault {
-    // Connect repositories
-    name repository NameRepository()
+class ValidationMiddleware<T : Vault<T>> : Middleware<T>() {
+    override fun onTransactionStarted(context: MiddlewareContext<T>) {
+        // Perform validation before state changes
+        context.transaction.modifiedProperties.forEach { state ->
+            validateState(state, context)
+        }
+    }
     
-    // Add effects
-    name effect ::println
-    
-    // Perform operations
-    operation { vault ->
-        name mutate "Jane Doe"
-        bio mutate "Engineering Lead"
-        socialLinks mutate listOf("github.com/jane", "twitter.com/jane")
+    private fun validateState(state: State<*>, context: MiddlewareContext<T>) {
+        // Custom validation logic
+        when (state()) {
+            is String -> require(state().toString().isNotBlank())
+            is Number -> require(state().toString().toInt() >= 0)
+        }
     }
 }
 ```
 
-## 💡 What Makes Vault Different?
+5. Add effects for reactive updates:
 
-### Traditional State Management
 ```kotlin
-// Hope nothing fails halfway through...
-viewModel.name = "Jane"
-viewModel.email = "jane@example.com"
-viewModel.status = "active"
-```
-
-### Vault's Approach
-```kotlin
-vault {
-    operation { vault ->
-        name mutate "Jane"
-        email mutate "jane@example.com"
-        status mutate "active"
-        // Automatic rollback if anything fails!
+userVault {
+    // React to state changes
+    username effect { newUsername ->
+        println("Username changed to: $newUsername")
+    }
+    
+    isLoggedIn effect { loggedIn ->
+        if (!loggedIn) {
+            // Clear sensitive data on logout
+            username mutate "guest"
+            profile mutate UserVault.UserProfile()
+        }
     }
 }
 ```
 
-## 🛠 Features In-Depth
+## Advanced Features
 
-### Repository Integration
+### Transaction Management
 
-Seamlessly connect to your data layer:
+Transactions ensure atomic state updates:
 
 ```kotlin
-class UserRepository : IRepository<String> {
-    private val _dataFlow = MutableSharedFlow<String>(replay = 1)
-    override fun flow() = _dataFlow.asSharedFlow()
-    override fun set(value: String) = _dataFlow.tryEmit(value)
+class ComplexAction : Action<UserVault> {
+    override fun invoke(vault: UserVault) = vault {
+        try {
+            // All changes succeed or none do
+            profile mutate fetchUserProfile()
+            preferences mutate loadPreferences()
+            settings mutate initializeSettings()
+        } catch (e: Exception) {
+            // Transaction automatically rolls back
+            throw e
+        }
+    }
 }
+```
 
-// One-line binding
+### Custom Middleware
+
+Create specialized middleware for your needs:
+
+```kotlin
+class AnalyticsMiddleware<T : Vault<T>> : Middleware<T>() {
+    override fun onTransactionCompleted(context: MiddlewareContext<T>) {
+        val metrics = context.transaction.modifiedProperties.map { state ->
+            val propertyName = context.vault.properties
+                .entries
+                .find { it.value == state }
+                ?.key
+            
+            MetricEvent(
+                property = propertyName ?: "unknown",
+                oldValue = context.transaction.previousValues[state],
+                newValue = state()
+            )
+        }
+        
+        trackMetrics(metrics)
+    }
+}
+```
+
+### State Validation
+
+Implement custom validation in repositories:
+
+```kotlin
+class EmailRepository : Repository<String> {
+    override fun set(value: String): Boolean {
+        return when {
+            !value.contains("@") -> false
+            !value.contains(".") -> false
+            value.length < 5 -> false
+            else -> true.also { _dataFlow.value = value }
+        }
+    }
+}
+```
+
+## Performance Considerations
+
+### Object Pooling
+
+Vault uses object pooling for efficient memory usage:
+
+```kotlin
+// Custom object pool for frequently created objects
+class TransactionPool<T : Transaction> {
+    private val pool = ObjectPool(
+        factory = { Transaction() },
+        reset = { it.clear() }
+    )
+
+    suspend fun acquire(): T = pool.acquire()
+    suspend fun release(item: T) = pool.release(item)
+}
+```
+
+### State Updates
+
+Optimize state updates for performance:
+
+```kotlin
+class BatchUpdateAction : Action<UserVault> {
+    override fun invoke(vault: UserVault) = vault {
+        // Batch multiple updates in a single transaction
+        val updates = fetchBatchUpdates()
+        updates.forEach { (key, value) ->
+            when (key) {
+                "username" -> username mutate value
+                "profile" -> profile mutate value
+                // ... more cases
+            }
+        }
+    }
+}
+```
+
+## Best Practices
+
+### State Organization
+
+Group related states together:
+
+```kotlin
+class AppVault : Vault<AppVault>() {
+    // User-related states
+    val user by state { UserState() }
+    
+    // UI-related states
+    val ui by state { UIState() }
+    
+    // Feature-specific states
+    val feature by state { FeatureState() }
+    
+    data class UserState(
+        val profile: UserProfile = UserProfile(),
+        val preferences: UserPreferences = UserPreferences()
+    )
+    
+    data class UIState(
+        val theme: Theme = Theme.LIGHT,
+        val language: String = "en"
+    )
+    
+    data class FeatureState(
+        val isEnabled: Boolean = false,
+        val configuration: Map<String, Any> = emptyMap()
+    )
+}
+```
+
+### Error Handling
+
+Implement comprehensive error handling:
+
+```kotlin
+when (val result = vault action LoginAction()) {
+    is TransactionResult.Success -> {
+        // Access transaction details
+        val modified = result.transaction.modifiedProperties
+        val previous = result.transaction.previousValues
+        handleSuccess(modified, previous)
+    }
+    is TransactionResult.Error -> {
+        when (val error = result.exception) {
+            is ValidationException -> handleValidationError(error)
+            is RepositoryException -> handleRepositoryError(error)
+            else -> handleUnexpectedError(error)
+        }
+    }
+}
+```
+
+## Testing
+
+### Test Repositories
+
+Create test-specific repositories:
+
+```kotlin
+class TestRepository<T : Any>(initialValue: T) : Repository<T> {
+    private val _flow = MutableStateFlow(initialValue)
+    private val updates = mutableListOf<T>()
+    
+    override fun flow() = _flow.asSharedFlow()
+    
+    override fun set(value: T) = true.also {
+        _flow.value = value
+        updates.add(value)
+    }
+    
+    fun getUpdates(): List<T> = updates.toList()
+}
+```
+
+### Test Middleware
+
+Track state changes in tests:
+
+```kotlin
+class TestMiddleware<T : Vault<T>> : Middleware<T>() {
+    private val _transactions = mutableListOf<Transaction>()
+    val transactions: List<Transaction> get() = _transactions
+    
+    override fun onTransactionCompleted(context: MiddlewareContext<T>) {
+        _transactions.add(context.transaction)
+    }
+}
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. State mutations outside transactions:
+```kotlin
+// ❌ Wrong: Direct state mutation
+userVault.username.set("john")
+
+// ✅ Correct: Mutation within transaction
+vault action UpdateUsernameAction("john")
+```
+
+2. Missing repository initialization:
+```kotlin
+// ❌ Wrong: Accessing state without repository
+val username = userVault.username()
+
+// ✅ Correct: Initialize repository first
 userVault {
     username repository UserRepository()
 }
 ```
 
-### Effect Handling
-
-Add reactive effects to any asset:
-
+3. Middleware ordering issues:
 ```kotlin
-userVault {
-    username effect { name ->
-        println("Name updated: $name")
-    }
-}
+// ❌ Wrong: Incorrect middleware order
+vault.middlewares(
+    AnalyticsMiddleware(),  // Depends on validation
+    ValidationMiddleware()
+)
+
+// ✅ Correct: Proper middleware order
+vault.middlewares(
+    ValidationMiddleware(),  // Validates first
+    AnalyticsMiddleware()   // Tracks validated changes
+)
 ```
 
-### Powerful Middleware
+### Debugging Tips
 
-Add logging, analytics, or any cross-cutting concern:
+Enable detailed logging:
 
 ```kotlin
-class LoggingMiddleware : Middleware<UserVault>() {
-    override fun onTransactionStarted(context: MiddlewareContext<UserVault>) {
-        println("Starting: ${context.transaction.useCaseId}")
-    }
-}
-
-vault.middlewares(LoggingMiddleware())
+val loggingMiddleware = LoggingMiddleware<UserVault>(
+    options = LoggingMiddleware.Options(
+        logLevel = LogLevel.DEBUG,
+        includeStackTrace = true,
+        includeStateValues = true,
+        formatter = CustomLogFormatter()
+    )
+)
 ```
 
-## 📊 Performance
+## License
 
-Vault is built for speed:
-- **Object Pooling**: Minimal garbage collection pressure through transaction pooling
-- **Efficient State Tracking**: Smart diffing and update mechanisms through Flow
-- **Optimized Flow Usage**: Minimal overhead for reactivity
-- **Transaction Management**: Efficient handling of concurrent operations
-
-## 🎨 Clean Architecture
-
-Perfect for modern architectural patterns:
-- **MVVM**: Perfect companion for ViewModels
-- **MVI**: Ideal for handling intents and state
-- **Clean Architecture**: Natural fit for use cases and repositories
-- **Repository Pattern**: First-class support through IRepository interface
-
-## 🤔 Why Choose Vault?
-
-| Feature | Vault | Redux | MobX |
-|---------|-------|-------|------|
-| Transaction Safety | ✅ | ❌ | ❌ |
-| Type Safety | ✅ | ⚠️ | ✅ |
-| Automatic Rollback | ✅ | ❌ | ❌ |
-| Coroutine Integration | ✅ | ⚠️ | ❌ |
-| Boilerplate | Minimal | Heavy | Moderate |
-| Learning Curve | Gentle | Steep | Moderate |
-
-## 🚦 Getting Started
-
-1. Add the dependency
-2. Create your first vault
-3. Write your first operation
-4. Watch our [Quick Start Video](https://vault.vynatix.com/quickstart)
-
-## 📊 Transaction Management
-
-Vault uses a sophisticated transaction system:
-- **Object Pooling**: Efficient reuse of transaction objects
-- **Automatic Tracking**: Tracks modified properties during transactions
-- **Rollback Support**: Stores previous values for automatic rollback
-- **Transaction Context**: Access through `activeTransaction` Flow
-- **Middleware Support**: Intercept and modify transactions
-- **Coroutine Integration**: Built for asynchronous operations
-
-## 📚 Documentation
-
-- [Full Documentation](https://vault.vynatix.com/docs)
-- [API Reference](https://vault.vynatix.com/api)
-- [Best Practices Guide](https://vault.vynatix.com/best-practices)
-- [Migration Guide](https://vault.vynatix.com/migration)
-
-## 🤝 Support
-
-- 💬 [Discord Community](https://discord.gg/vault)
-- 📧 [Email Support](mailto:support@vynatix.com)
-- 🐦 [Twitter Updates](https://twitter.com/vynatix)
-
-## 📜 License
-
-Vault is available under the Apache License 2.0. See the [LICENSE](LICENSE) file for more info.
-
----
-
-<p align="center">Built with ❤️ by <a href="https://vynatix.com">Vynatix</a></p>
+Apache 2.0 License
