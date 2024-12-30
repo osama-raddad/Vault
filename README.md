@@ -1,391 +1,217 @@
-# Vault
+# 🔒 Vault.kt
 
-Vault is a next-generation state management library for Kotlin that combines transactional safety with reactive programming. It provides a robust, type-safe way to manage application state with automatic error recovery and seamless persistence integration.
+> Transaction-safe state management for Kotlin coroutines that just works.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Latest Release](https://img.shields.io/badge/release-3.17.4-green.svg)](https://github.com/vynatix/vault/releases)
+[![Kotlin](https://img.shields.io/badge/kotlin-1.9.0-orange.svg)](https://kotlinlang.org)
 
-## Features
+Vault is a revolutionary state management library that brings the power of database transactions to your application state. Built from the ground up for Kotlin, it combines bulletproof reliability with elegant syntax and seamless coroutine integration.
 
-- 🔒 **Transactional State Management**: Every state change is wrapped in a transaction that either completes successfully or rolls back automatically
-- ⚡ **Reactive Programming**: Built-in integration with Kotlin Flow for efficient reactive updates
-- 🎯 **Type-safe API**: Leverages Kotlin's type system for compile-time safety
-- 🔄 **Automatic Rollback**: Built-in error recovery keeps your state consistent
-- 📦 **Repository Pattern**: Seamless integration with your data layer
-- 🛠 **Middleware Support**: Extensible system for cross-cutting concerns
-- 🚀 **High Performance**: Optimized with features like operation pooling
-- 📝 **Clean Syntax**: Minimal boilerplate through property delegation
-
-## Installation
+## ✨ Why Vault?
 
 ```kotlin
-// build.gradle.kts
-dependencies {
-    implementation("com.vynatix:vault:3.17.4")
-}
-```
-
-## Quick Start
-
-1. Define your vault with assets:
-
-```kotlin
-class UserVault(vaultFactory: VaultFactory) : IVault by vaultFactory() {
-    val username by asset { "John Doe" }
-    val email by asset { "none" }
+class UserVault : Vault<UserVault>() {
+    val username by asset { "none" }
     val isLoggedIn by asset { false }
 }
-```
 
-2. Perform atomic operations:
-
-```kotlin
-suspend fun login() = userVault.operation("login") {
-    userVault.username("Jane Doe")
-    userVault.email("jane@example.com")
-    userVault.isLoggedIn(true)
+// Atomic operations with automatic rollback
+val result = userVault {
+    username mutate "Jane Doe"
+    isLoggedIn mutate true
+    // If anything fails, everything rolls back automatically!
 }
 ```
 
-3. Observe state changes:
+### 🚀 Key Features
+
+- **Transactional Safety**: Every state change is wrapped in a transaction that either succeeds completely or rolls back automatically
+- **Zero Boilerplate**: Property delegation and clean syntax make state management a breeze
+- **Type-Safe by Design**: Leverage Kotlin's type system for compile-time safety
+- **High Performance**: Optimized with object pooling and efficient state tracking
+- **Built for Scale**: From small apps to enterprise systems, Vault grows with you
+- **Coroutine Integration**: Built on Kotlin Flow for seamless reactivity
+- **Direct binding**: Direct binding to data sources through the repository pattern
+
+## 📦 Installation
+
+Add Vault to your project in just one line:
 
 ```kotlin
-userVault.username.onEach { username ->
-    println("Username updated: $username")
-}.launchIn(scope)
+implementation("com.vynatix:vault:3.17.4")
 ```
 
-## Key Concepts
-### Built for Performance
-Vault doesn't just make state management safer—it makes it faster. Through innovative features like operation pooling and efficient state tracking, Vault minimizes memory allocations and optimizes state updates.
-### Assets
+## 🎯 Quick Start
 
-Assets are state containers and each asset is:
-- Type-safe
-- Reactive
-- Transaction-aware
-- Repository-backed
-- Automatically managed
+### 1. Define Your State
+
 ```kotlin
-class ProfileVault(vaultFactory: VaultFactory) : IVault by vaultFactory() {
+class ProfileVault : Vault<ProfileVault>() {
     val name by asset { "" }
     val bio by asset { "" }
     val socialLinks by asset { listOf<String>() }
 }
 ```
 
-### Transactions
-Imagine if you could manage your application state with the same reliability as database transactions. That's exactly what Vault brings to the table. Every state change in Vault is wrapped in a transaction that either completes successfully or rolls back automatically, ensuring your application state remains consistent even when errors occur.
-
-All state modifications are wrapped in transactions:
+### 2. Create Your Repositories
 
 ```kotlin
-vault.operation("updateProfile") {
-    vault.name("Jane Doe")
-    vault.bio("Software Engineer")
-    // Automatic rollback if any operation fails
+class NameRepository : IRepository<String> {
+    private val _dataFlow = MutableSharedFlow<String>(replay = 1)
+    override fun flow(): SharedFlow<String> = _dataFlow.asSharedFlow()
+    override fun set(value: String) = _dataFlow.tryEmit(value)
 }
 ```
 
+### 3. Connect and Operate
+
+```kotlin
+val vault = ProfileVault()
+vault {
+    // Connect repositories
+    name repository NameRepository()
+    
+    // Add effects
+    name effect ::println
+    
+    // Perform operations
+    operation { vault ->
+        name mutate "Jane Doe"
+        bio mutate "Engineering Lead"
+        socialLinks mutate listOf("github.com/jane", "twitter.com/jane")
+    }
+}
+```
+
+## 💡 What Makes Vault Different?
+
+### Traditional State Management
+```kotlin
+// Hope nothing fails halfway through...
+viewModel.name = "Jane"
+viewModel.email = "jane@example.com"
+viewModel.status = "active"
+```
+
+### Vault's Approach
+```kotlin
+vault {
+    operation { vault ->
+        name mutate "Jane"
+        email mutate "jane@example.com"
+        status mutate "active"
+        // Automatic rollback if anything fails!
+    }
+}
+```
+
+## 🛠 Features In-Depth
+
 ### Repository Integration
 
-Vault seamlessly integrates with your data layer through its repository pattern:
+Seamlessly connect to your data layer:
 
 ```kotlin
 class UserRepository : IRepository<String> {
     private val _dataFlow = MutableSharedFlow<String>(replay = 1)
-
-    override fun set(value: String) {
-        _dataFlow.tryEmit(value)
-    }
-
-    override fun flow(): SharedFlow<String> = _dataFlow.asSharedFlow()
+    override fun flow() = _dataFlow.asSharedFlow()
+    override fun set(value: String) = _dataFlow.tryEmit(value)
 }
 
-// Bind repository to asset
-userVault.username.repository(UserRepository())
+// One-line binding
+userVault {
+    username repository UserRepository()
+}
 ```
 
-### Middleware
+### Effect Handling
 
-Add cross-cutting concerns with middleware:
+Add reactive effects to any asset:
 
 ```kotlin
-data object LoggingMiddleware : Middleware<IVault>() {
-    override suspend fun onTransactionStarted(context: MiddlewareContext<IVault>) {
-        println("Operation started: ${context.transaction.useCaseId}")
+userVault {
+    username effect { name ->
+        println("Name updated: $name")
     }
 }
-
-userVault.middlewares(LoggingMiddleware)
 ```
 
-## The Future of State Management
+### Powerful Middleware
 
-Vault represents a significant step forward in state management, combining:
-- Transactional safety
-- Reactive programming
-- Clean architecture
-- High performance
-- Developer ergonomics
-
-Whether you're building a small application or a large-scale system, Vault provides the tools you need to manage state effectively, safely, and elegantly.
-
-## Ready to Try Vault?
-
-Experience the next generation of state management. With Vault, you get the power of transactional operations, the simplicity of property delegation, and the reliability of reactive programming—all in one cohesive package.
-
-Join the growing community of developers who are discovering how Vault can transform their approach to state management in Kotlin applications.
-
-Remember: Your application state is too important to leave to chance. Choose Vault and build with confidence.
-
-## How Vault Compares to Other Solutions
-
-Let's look at how Vault stacks up against other popular state management solutions:
-
-### Vault vs Redux
-
-While Redux pioneered unidirectional data flow and centralized state management, Vault takes these concepts further:
+Add logging, analytics, or any cross-cutting concern:
 
 ```kotlin
-// Redux approach
-const userReducer = (state, action) => {
-  switch (action.type) {
-    case 'UPDATE_USER':
-      return { ...state, username: action.payload }
-    default:
-      return state
-  }
-}
-
-// Vault approach
-class UserVault(vaultFactory: VaultFactory) : IVault by vaultFactory() {
-    val username by asset { "" }
-}
-
-vault.operation("updateUser") {
-    vault.username("newName")
-}
-```
-
-**Key Advantages over Redux:**
-- No boilerplate actions or reducers
-- Built-in transaction safety
-- Type-safe by default
-- Automatic state rollback
-- Direct property access
-- Built-in persistence layer
-
-### Vault vs MobX
-
-MobX brought reactive programming to state management. Vault builds on this foundation:
-
-```kotlin
-// MobX approach
-class UserStore {
-    @observable username = ""
-    
-    @action
-    setUsername(name) {
-        this.username = name
+class LoggingMiddleware : Middleware<UserVault>() {
+    override fun onTransactionStarted(context: MiddlewareContext<UserVault>) {
+        println("Starting: ${context.transaction.useCaseId}")
     }
 }
 
-// Vault approach
-class UserVault(vaultFactory: VaultFactory) : IVault by vaultFactory() {
-    val username by asset { "" }
-}
+vault.middlewares(LoggingMiddleware())
 ```
 
-**Key Advantages over MobX:**
-- Native Kotlin coroutines integration
-- Transaction-based operations
-- Built-in repository pattern
-- More predictable state changes
-- Better testing support
-- No decorators needed
+## 📊 Performance
 
-### Vault vs BLoC
+Vault is built for speed:
+- **Object Pooling**: Minimal garbage collection pressure through transaction pooling
+- **Efficient State Tracking**: Smart diffing and update mechanisms through Flow
+- **Optimized Flow Usage**: Minimal overhead for reactivity
+- **Transaction Management**: Efficient handling of concurrent operations
 
-BLoC pattern brought stream-based state management to Flutter. Vault offers similar benefits with additional safety:
+## 🎨 Clean Architecture
 
-```kotlin
-// BLoC approach
-class UserBloc extends Bloc<UserEvent, UserState> {
-    Stream<UserState> mapEventToState(UserEvent event) async* {
-        yield UserState(username: event.username)
-    }
-}
+Perfect for modern architectural patterns:
+- **MVVM**: Perfect companion for ViewModels
+- **MVI**: Ideal for handling intents and state
+- **Clean Architecture**: Natural fit for use cases and repositories
+- **Repository Pattern**: First-class support through IRepository interface
 
-// Vault approach
-class UserVault(vaultFactory: VaultFactory) : IVault by vaultFactory() {
-    val username by asset { "" }
-}
-```
+## 🤔 Why Choose Vault?
 
-**Key Advantages over BLoC:**
-- Simpler mental model
-- Automatic error recovery
-- Built-in transaction support
-- More intuitive API
-- Property-based access
-- Better type inference
+| Feature | Vault | Redux | MobX |
+|---------|-------|-------|------|
+| Transaction Safety | ✅ | ❌ | ❌ |
+| Type Safety | ✅ | ⚠️ | ✅ |
+| Automatic Rollback | ✅ | ❌ | ❌ |
+| Coroutine Integration | ✅ | ⚠️ | ❌ |
+| Boilerplate | Minimal | Heavy | Moderate |
+| Learning Curve | Gentle | Steep | Moderate |
 
-### Vault vs Mobius
+## 🚦 Getting Started
 
-Spotify's Mobius offers pure functional state management. Vault provides similar benefits with more flexibility:
+1. Add the dependency
+2. Create your first vault
+3. Write your first operation
+4. Watch our [Quick Start Video](https://vault.vynatix.com/quickstart)
 
-```kotlin
-// Mobius approach
-data class Model(val username: String)
-fun update(model: Model, event: Event): Next<Model, Effect>
+## 📊 Transaction Management
 
-// Vault approach
-class UserVault(vaultFactory: VaultFactory) : IVault by vaultFactory() {
-    val username by asset { "" }
-}
-```
+Vault uses a sophisticated transaction system:
+- **Object Pooling**: Efficient reuse of transaction objects
+- **Automatic Tracking**: Tracks modified properties during transactions
+- **Rollback Support**: Stores previous values for automatic rollback
+- **Transaction Context**: Access through `activeTransaction` Flow
+- **Middleware Support**: Intercept and modify transactions
+- **Coroutine Integration**: Built for asynchronous operations
 
-**Key Advantages over Mobius:**
-- More familiar property-based API
-- Built-in persistence
-- Simpler integration
-- Transaction safety
-- Direct state access when needed
-- Less boilerplate
+## 📚 Documentation
 
-### Feature Comparison Matrix
+- [Full Documentation](https://vault.vynatix.com/docs)
+- [API Reference](https://vault.vynatix.com/api)
+- [Best Practices Guide](https://vault.vynatix.com/best-practices)
+- [Migration Guide](https://vault.vynatix.com/migration)
 
-| Feature | Vault | Redux | MobX | BLoC | Mobius |
-|---------|-------|-------|------|------|---------|
-| Transaction Support | ✅ Built-in | ❌ Manual | ⚠️ Partial | ❌ Manual | ❌ Manual |
-| Type Safety | ✅ Native | ⚠️ Plugin | ✅ Native | ✅ Native | ✅ Native |
-| Reactivity | ✅ Flow | ⚠️ Manual | ✅ Auto | ✅ Stream | ⚠️ Manual |
-| Error Recovery | ✅ Automatic | ❌ Manual | ❌ Manual | ❌ Manual | ❌ Manual |
-| Persistence | ✅ Built-in | ❌ Manual | ❌ Manual | ❌ Manual | ❌ Manual |
-| Testing | ✅ Simple | ⚠️ Complex | ⚠️ Complex | ✅ Simple | ✅ Simple |
-| Boilerplate | ✅ Minimal | ❌ Heavy | ✅ Minimal | ⚠️ Moderate | ⚠️ Moderate |
-| Learning Curve | ✅ Low | ❌ High | ✅ Low | ⚠️ Moderate | ❌ High |
+## 🤝 Support
 
-
-## Best Practices
-
-1. **Group Related States**: Organize related states in a single vault
-2. **Meaningful Operation Names**: Use descriptive names for operations
-3. **Keep Transactions Small**: Focus on atomic operations
-4. **Error Handling**: Let the vault handle rollbacks automatically
-5. **Repository Pattern**: Use repositories for data persistence
-6. **Middleware for Cross-cutting Concerns**: Implement logging, analytics, etc.
-
-## Performance Considerations
-
-- Operations are pooled for memory efficiency
-- State changes are tracked efficiently
-- Middleware execution is optimized
-- Flow operations are cold by default
-
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
-
-## License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-Special thanks to all contributors who have helped shape Vault into what it is today.
-
-## Support
-
-- 📚 [Documentation](https://vault.vynatix.com/docs)
 - 💬 [Discord Community](https://discord.gg/vault)
-- 🐦 [Twitter](https://twitter.com/vynatix)
 - 📧 [Email Support](mailto:support@vynatix.com)
+- 🐦 [Twitter Updates](https://twitter.com/vynatix)
 
-## FAQ
+## 📜 License
 
-**Q: Why choose Vault over other state management solutions?**  
-A: Vault provides unique features like transactional safety, automatic rollback, and seamless repository integration while maintaining a clean, reactive API.
+Vault is available under the Apache License 2.0. See the [LICENSE](LICENSE) file for more info.
 
-**Q: Is Vault suitable for large-scale applications?**  
-A: Yes! Vault is designed for scalability and is particularly well-suited for enterprise applications with complex state management needs.
+---
 
-**Q: How does Vault handle concurrent modifications?**  
-A: Vault uses Kotlin coroutines and mutex locks to ensure thread-safe state modifications.
-
-**Q: Can I use Vault with existing repositories?**  
-A: Yes, Vault's `IRepository` interface makes it easy to integrate with existing data sources.
-
-## For Managers
-
-Vault helps engineering managers deliver business value through:
-
-### Risk Management
-- Automatic rollback capabilities prevent cascading failures
-- Built-in audit trails for compliance
-- Complete history of state changes
-
-### Team Productivity
-- Faster development cycles with less boilerplate
-- Easier onboarding with standard patterns
-- Clear separation of concerns
-
-### Resource Optimization
-- Reduced development and maintenance time
-- Built-in debugging and monitoring
-- Lower technical debt
-
-### Business Metrics
-- Real-time insights into system state
-- Performance monitoring
-- Clear success metrics
-
-See our detailed [Manager's Guide](docs/managers-guide.md) for more information.
-
-## For Architects
-
-Vault provides architects with powerful tools for building robust systems:
-
-### Clean Architecture Support
-```kotlin
-// Clear separation of concerns
-class OrderUseCase(private val orderVault: OrderVault) {
-    suspend fun completeOrder(orderId: String) = orderVault.operation("completeOrder") {
-        orderVault.status(OrderStatus.COMPLETED)
-        orderVault.completedAt(Instant.now())
-    }
-}
-```
-
-### Domain-Driven Design
-```kotlin
-// Domain-specific vaults
-class OrderVault(vaultFactory: VaultFactory) : IVault by vaultFactory() {
-    val status by asset { OrderStatus.PENDING }
-    val items by asset { emptyList<OrderItem>() }
-    val totalAmount by asset { Money.zero() }
-}
-```
-
-### Event-Driven Architecture
-- Built-in support for reactive programming
-- Clean event propagation
-- State synchronization
-
-### Enterprise Patterns
-- CQRS support
-- Event sourcing capabilities
-- Saga pattern for distributed transactions
-- Microservices integration
-
-See our detailed [Architect's Guide](docs/architects-guide.md) for more information.
-
-# Roadmap
-
-- [ ] More built-in middleware options
-- [ ] Enhanced debugging tools
-- [ ] Performance monitoring utilities
-- [ ] Additional repository adapters
-- [ ] Integration with popular frameworks
-
-Keep an eye on our [GitHub issues](https://github.com/vynatix/vault/issues) for updates!
+<p align="center">Built with ❤️ by <a href="https://vynatix.com">Vynatix</a></p>

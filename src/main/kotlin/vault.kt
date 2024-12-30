@@ -4,39 +4,25 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlin.collections.component1
-import kotlin.collections.component2
+import java.util.*
 import kotlin.collections.set
 import kotlin.reflect.KProperty
 
+interface State<T : Any> : () -> T
 
-interface IAsset<T : Any> : SharedFlow<T> {
-    suspend infix fun repository(repository: IRepository<T>)
-    operator fun invoke(): T
-}
-
-interface IRepository<T : Any> {
+interface Repository<T : Any> {
     fun flow(): SharedFlow<T>
-    infix fun set(value: T)
+    infix fun set(value: T): Boolean
 }
 
-fun interface IMiddleware<T : IVault> : suspend (T, suspend () -> Unit) -> Unit
+fun interface Initializer<T : Any> : () -> T
+fun interface Action<V : Vault<V>> : (V) -> Unit
+fun interface Effect<T : Any> : (T) -> Unit
 
-interface IVaultScope {
-    suspend operator fun <T : Any> IAsset<T>.invoke(value: T)
+fun interface StateDelegate<T : Any> {
+    operator fun getValue(thisRef: Any?, property: KProperty<*>): State<T>
 }
 
-fun interface IAssetDelegate<T : Any> {
-    operator fun getValue(thisRef: Any?, property: KProperty<*>): IAsset<T>
-}
-
-interface IVault {
-    val properties: Map<String, IAsset<*>>
-    val activeOperation: StateFlow<Operation?>
-    suspend fun operation(useCaseId: String, action: suspend IVaultScope.() -> Unit): OperationResult
-    fun middlewares(vararg middleware: Middleware<IVault>)
-    infix fun <T : Any> asset(initialize: () -> T): IAssetDelegate<T>
-}
 
 class ObjectPool<T>(
     private val factory: () -> T,
@@ -55,78 +41,44 @@ class ObjectPool<T>(
     }
 }
 
-object OperationPool {
+object TransactionPool {
     private val pool = ObjectPool(
-        factory = { Operation("") },
+        factory = { Transaction("") },
         reset = { op ->
             op.modifiedProperties.clear()
             op.previousValues.clear()
         }
     )
 
-    suspend fun acquire(useCaseId: String): Operation = pool.acquire().apply {
+    suspend fun acquire(useCaseId: String): Transaction = pool.acquire().apply {
         this.useCaseId = useCaseId
     }
 
-    suspend fun release(operation: Operation) {
-        pool.release(operation)
+    suspend fun release(transaction: Transaction) {
+        pool.release(transaction)
     }
 }
 
-data class Operation(
+data class Transaction(
     var useCaseId: String,
-    val modifiedProperties: MutableSet<IAsset<out Any>> = mutableSetOf(),
-    val previousValues: MutableMap<IAsset<out Any>, Any> = mutableMapOf()
+    val modifiedProperties: MutableSet<State<out Any>> = mutableSetOf(),
+    val previousValues: MutableMap<State<out Any>, Any> = mutableMapOf()
 )
 
-sealed class OperationResult {
-    data class Success(val operation: Operation) : OperationResult()
-    data class Error(val exception: Throwable, val operation: Operation) : OperationResult()
-}
-
-class AssetFactory {
-    operator fun <T : Any> invoke(initialize: () -> T): IAsset<T> = Asset(initialize)
+sealed class TransactionResult {
+    data class Success(val transaction: Transaction) : TransactionResult()
+    data class Error(val exception: Throwable, val transaction: Transaction) : TransactionResult()
 }
 
 
-class VaultFactory(
-    private val assetFactory: AssetFactory = AssetFactory()
-) {
-    operator fun invoke(): IVault = Vault(assetFactory)
-}
-
-class Asset<T : Any>(
-    private val initialize: () -> T,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
-    private val _flow: MutableSharedFlow<T> = MutableSharedFlow(replay = 1)
-) : IAsset<T>, SharedFlow<T> by _flow {
-    private var _repository: IRepository<T>? = null
-    private var _value = initialize()
-        get() = _flow.replayCache.firstOrNull() ?: field
-
-    override suspend infix fun repository(repository: IRepository<T>) {
-        _repository = repository
-        scope.launch { repository.flow().collect { _value = it }}
-    }
-
-    override operator fun invoke(): T = _value
-
-    internal operator fun invoke(value: T) {
-        _value = value
-        _repository?.set(value)
-        _flow.tryEmit(value)
-    }
-}
-
-
-open class Middleware<T : IVault> : IMiddleware<T> {
-    data class MiddlewareContext<T : IVault>(
+open class Middleware<T : Vault<T>> {
+    data class MiddlewareContext<T : Vault<T>>(
         val vault: T,
-        val transaction: Operation,
+        val transaction: Transaction,
         val metadata: MutableMap<String, Any> = mutableMapOf()
     )
 
-    private suspend fun execute(context: MiddlewareContext<T>, next: suspend () -> Unit) {
+    private fun execute(context: MiddlewareContext<T>, next: () -> Unit) {
         try {
             onTransactionStarted(context)
             next()
@@ -137,165 +89,154 @@ open class Middleware<T : IVault> : IMiddleware<T> {
         }
     }
 
-    override suspend fun invoke(vault: T, next: suspend () -> Unit) {
+    operator fun invoke(vault: T, next: () -> Unit) {
         val context = MiddlewareContext(
             vault = vault,
-            transaction = vault.activeOperation.value ?: error("No active transaction")
+            transaction = vault.activeTransaction.value ?: error("No active transaction")
         )
         execute(context, next)
     }
 
-    protected open suspend fun onTransactionStarted(context: MiddlewareContext<T>) {}
-    protected open suspend fun onTransactionCompleted(context: MiddlewareContext<T>) {}
-    protected open suspend fun onTransactionError(
+    protected open fun onTransactionStarted(context: MiddlewareContext<T>) {}
+    protected open fun onTransactionCompleted(context: MiddlewareContext<T>) {}
+    protected open fun onTransactionError(
         context: MiddlewareContext<T>,
         error: Throwable
     ) {
     }
 }
 
-class Vault(
-    private val assetFactory: AssetFactory
-) : IVault {
-    private val middlewares = mutableListOf<Middleware<IVault>>()
-    override val properties = mutableMapOf<String, IAsset<out Any>>()
-    override val activeOperation = MutableStateFlow<Operation?>(null)
+abstract class Vault<Self> where Self : Vault<Self> {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val _activeTransaction = MutableStateFlow<Transaction?>(null)
+    val activeTransaction: StateFlow<Transaction?> = _activeTransaction.asStateFlow()
 
-    override fun middlewares(vararg middleware: Middleware<IVault>) {
-        middlewares.addAll(middleware)
+    private val _properties = mutableMapOf<String, MutableState<*>>()
+    val properties: Map<String, State<*>> = _properties
+
+    private val middlewareList = mutableListOf<Middleware<Self>>()
+
+    @Suppress("UNCHECKED_CAST")
+    private val self: Self get() = this as Self
+
+    fun middlewares(vararg middleware: Middleware<Self>) {
+        middlewareList.addAll(middleware)
     }
 
-    override suspend fun operation(
-        useCaseId: String,
-        action: suspend IVaultScope.() -> Unit
-    ): OperationResult {
-        val operation = OperationPool.acquire(useCaseId)
-        activeOperation.value = operation
+    infix fun action(action: Action<Self>): TransactionResult {
+        return runBlocking {
+            val transaction = TransactionPool.acquire(UUID.randomUUID().toString())
+            try {
+                _activeTransaction.value = transaction
 
-        return try {
-            properties.forEach { (_, prop) -> operation.previousValues[prop] = prop() }
-            createMiddlewareChain(action)()
-            OperationResult.Success(operation)
-        } catch (e: Throwable) {
-            operation.previousValues.forEach { (asset, value) ->
-                (asset as Asset<Any>)(value)
+                try {
+                    middlewareList.fold({
+                        action(self)
+                    }) { acc, middleware ->
+                        { middleware(self, acc) }
+                    }.invoke()
+
+                    TransactionResult.Success(transaction)
+                } catch (e: Throwable) {
+                    TransactionResult.Error(e, transaction)
+                } finally {
+                    _activeTransaction.value = null
+                    TransactionPool.release(transaction)
+                }
+            } catch (e: Throwable) {
+                TransactionResult.Error(e, transaction)
             }
-            OperationResult.Error(e, operation).also { throw e }
-        } finally {
-            activeOperation.value = null
-            OperationPool.release(operation)
         }
     }
 
-    private fun createMiddlewareChain(action: suspend IVaultScope.() -> Unit): suspend () -> Unit {
-        val vaultScope = object : IVaultScope {
-            override suspend fun <T : Any> IAsset<T>.invoke(value: T) {
-                val currentOperation = activeOperation.value
-                    ?: throw IllegalStateException("No active operation")
-                currentOperation.modifiedProperties.add(this)
-                (this as Asset)(value)
+    operator fun <R> invoke(block: Self.() -> R): R = block(self)
+
+    private fun <T : Any> state(
+        initialize: Initializer<T>,
+        flow: MutableStateFlow<T> = MutableStateFlow(initialize())
+    ): StateDelegate<T> {
+        return StateDelegate { _, property ->
+            val existing = _properties[property.name]
+            if (existing != null) {
+                @Suppress("UNCHECKED_CAST")
+                existing as MutableState<T>
+            } else {
+                MutableState(flow).also { state ->
+                    _properties[property.name] = state
+                }
             }
         }
-        return middlewares.foldRight({ vaultScope.action() }) { middleware, next ->
-            { middleware(this) { next() } }
+    }
+
+    infix fun <T : Any> state(
+        initialize: Initializer<T>
+    ): StateDelegate<T> = state(initialize, MutableStateFlow(initialize()))
+
+    infix fun <T : Any> state(
+        flow: MutableStateFlow<T>
+    ): StateDelegate<T> = state(flow = flow)
+
+    infix fun <T : Any> State<T>.effect(effect: Effect<T>): Job = scope.launch {
+        getMutableState().flow.collect(effect::invoke)
+    }
+
+    infix fun <T : Any> State<T>.repository(repository: Repository<T>) {
+        getMutableState().apply {
+            this@apply.repository = repository
+
         }
+
     }
 
-    override infix  fun <T : Any> asset(
-        initialize: () -> T,
-    ): IAssetDelegate<T> = assetFactory(initialize).run {
-        IAssetDelegate { _, property ->
-            properties[property.name] = this
-            this
+    infix fun <T : Any> State<T>.mutate(that: T) {
+        val state = getMutableState()
+        val transaction = activeTransaction.value
+            ?: error("Mutation outside transaction is not allowed")
+
+        if (state !in transaction.modifiedProperties) {
+            transaction.previousValues[state] = state.get()
+            transaction.modifiedProperties.add(state)
         }
-    }
-}
 
-
-///////////// example
-class UserRepository : IRepository<String> {
-    private val _dataFlow = MutableSharedFlow<String>(replay = 1)
-
-
-    override fun set(value: String) {
-        _dataFlow.tryEmit(value)
+        state.set(that)
     }
 
-    override fun flow(): SharedFlow<String> = _dataFlow.asSharedFlow()
-}
-
-class UserVault(vaultFactory: VaultFactory) : IVault by vaultFactory() {
-    val username by asset { "John Doe" }
-    val email by asset { "none" }
-    val loginAttempts by asset { 1 }
-    val isLoggedIn by asset { false }
-}
-
-class LoginUseCase(private val vault: UserVault) {
-    suspend operator fun invoke() = vault.operation("login") {
-        vault.username("Osama Raddad")
-        vault.email("jane@example.com")
-        vault.loginAttempts(1)
-        vault.isLoggedIn(true)
+    @Suppress("UNCHECKED_CAST")
+    private fun <T : Any> State<T>.getMutableState(): MutableState<T> {
+        return this as? MutableState<T> ?: error("State must be created by this Vault instance")
     }
-}
-
-data object LoggingMiddleware : Middleware<IVault>() {
-    override suspend fun onTransactionStarted(context: MiddlewareContext<IVault>) {
-        println("Operation started: ${context.transaction.useCaseId}")
-
-        println("Initial state:")
-        context.transaction.previousValues.forEach { (asset, value) ->
-            println("  ${getAssetName(context.vault, asset)}: $value")
-        }
-    }
-
-    override suspend fun onTransactionCompleted(context: MiddlewareContext<IVault>) {
-        println("\nOperation completed: ${context.transaction.useCaseId}")
-        println("Modified properties:")
-        context.vault.properties
-            .filter { (_, asset) -> context.transaction.previousValues[asset] != asset() }
-            .forEach { (name, asset) ->
-                val previousValue = context.transaction.previousValues[asset]
-                val currentValue = asset()
-                println("  $name: $previousValue -> $currentValue")
+//    private inner class MutableState<T : Any>(
+//        initialValue: T,
+//    ) : State<T> {
+//        lateinit var repository: Repository<T>
+//        val flow: StateFlow<T> by lazy { repository.flow().stateIn(scope, SharingStarted.Lazily, initialValue) }
+//        fun get(): T = flow.value
+//        fun set(value: T) = repository.set(value)
+//        override fun invoke(): T = get()
+//    }
+    private inner class MutableState<T : Any>(
+        private val _flow: MutableStateFlow<T>
+    ) : State<T> {
+        lateinit var repository: Repository<T>
+        val flow: StateFlow<T> by lazy {
+            scope.launch {
+                repository.flow().collect { value ->
+                    _flow.value = value
+                }
             }
-    }
+            _flow
+        }
 
-    override suspend fun onTransactionError(context: MiddlewareContext<IVault>, error: Throwable) {
-        println("\nOperation failed: ${context.transaction.useCaseId}")
-        println("Error: $error")
-    }
+        fun get(): T = flow.value
 
-    private fun getAssetName(vault: IVault, asset: IAsset<*>): String {
-        return vault.properties.entries
-            .find { it.value === asset }
-            ?.key ?: "unknown"
+        fun set(value: T): Boolean {
+            val success = repository.set(value)
+            if (success) {
+                _flow.value = value
+            }
+            return success
+        }
+
+        override fun invoke(): T = get()
     }
 }
-
-fun main() = runBlocking {
-    val userVault = UserVault(VaultFactory()).apply {
-        middlewares(LoggingMiddleware)
-    }
-
-    val repo = UserRepository()
-    userVault.username.onEach {
-        println(it)
-    }.launchIn(this)
-    userVault.username repository repo
-
-
-    delay(1000)
-    LoginUseCase(userVault)()
-    delay(1000)
-
-    println("\nCurrent State:")
-    println("Username: ${userVault.username()}")
-    println("Email: ${userVault.email()}")
-    println("Login Attempts: ${userVault.loginAttempts()}")
-    println("Is Logged In: ${userVault.isLoggedIn()}")
-}
-
-
-//////////////////
