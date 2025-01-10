@@ -1,17 +1,20 @@
 package com.vynatix
 
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+abstract class Vault<Self : Vault<Self>> {
+    private val transactionLock = VaultLock()
+    private val propertiesLock = VaultLock()
+    private val middlewareLock = VaultLock()
+    private val stateLock = VaultLock()
 
-abstract class Vault<Self> where Self : Vault<Self> {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val _activeTransaction = MutableStateFlow<Transaction?>(null)
-    val activeTransaction: StateFlow<Transaction?> = _activeTransaction.asStateFlow()
+    @Volatile
+    private var _activeTransaction: Transaction? = null
+    var activeTransaction: Transaction?
+        get() = transactionLock.withLock { _activeTransaction }
+        private set(value) = transactionLock.withLock { _activeTransaction = value }
 
     private val _properties = mutableMapOf<String, MutableState<*>>()
-    val properties: Map<String, State<*>> = _properties
+    val properties: Map<String, State<*>>
+        get() = propertiesLock.withLock { _properties.toMap() }
 
     private val middlewareList = mutableListOf<Middleware<Self>>()
 
@@ -19,22 +22,37 @@ abstract class Vault<Self> where Self : Vault<Self> {
     private val self: Self get() = this as Self
 
     fun middlewares(vararg middleware: Middleware<Self>) {
-        middlewareList.addAll(middleware)
+        middlewareLock.withLock {
+            middlewareList.addAll(middleware)
+        }
+    }
+
+    fun clearMiddleware() {
+        middlewareLock.withLock {
+            middlewareList.clear()
+        }
     }
 
     infix fun action(action: Self.() -> Unit): TransactionResult {
-        return runBlocking {
-            val transaction = Transaction(action::class.simpleName ?: UUID.randomUUID().toString())
+        return transactionLock.withLock {
+            val transaction = Transaction(
+                action::class.simpleName ?: UUID.randomUUID().toString()
+            )
 
             try {
-                _activeTransaction.value = transaction
+                activeTransaction = transaction
 
-                transaction.executeWithinTransaction {
-                    middlewareList.fold({
-                        action(self)
-                    }) { acc, middleware ->
-                        { middleware(self, acc) }
-                    }.invoke()
+                return@withLock transaction.executeWithinTransaction {
+                    middlewareLock.withLock {
+                        // Create a snapshot of middleware to reduce lock time
+                        val currentMiddleware = middlewareList.toList()
+
+                        currentMiddleware.fold({
+                            action(self)
+                        }) { acc, middleware ->
+                            { middleware(self, acc) }
+                        }.invoke()
+                    }
                 }.fold(
                     onSuccess = {
                         TransactionResult.Success(transaction)
@@ -44,72 +62,86 @@ abstract class Vault<Self> where Self : Vault<Self> {
                     }
                 )
             } finally {
-                _activeTransaction.value = null
+                activeTransaction = null
             }
         }
     }
 
-    operator fun <R> invoke(block: Self.() -> R): R = block(self)
+    operator fun <R> invoke(block: Self.() -> R): R = stateLock.withLock {
+        block(self)
+    }
 
     fun <T : Any> state(
-        validator: StateValidator<T>? = null,
-        initialize: Initializer<T>): StateDelegate<T> {
+        transformer: Transformer<T>? = null,
+        initialize: Initializer<T>
+    ): StateDelegate<T> {
         return StateDelegate { _, property ->
-            val existing = _properties[property.name]
-            if (existing != null) {
-                @Suppress("UNCHECKED_CAST")
-                existing as MutableState<T>
-            } else {
-                MutableState(initialize(), scope,validator).also { state ->
-                    _properties[property.name] = state
+            propertiesLock.withLock {
+                val existing = _properties[property.name]
+                if (existing != null) {
+                    @Suppress("UNCHECKED_CAST")
+                    existing as MutableState<T>
+                } else {
+                    MutableState(initialize(), transformer).also { state ->
+                        _properties[property.name] = state
+                    }
                 }
             }
         }
     }
 
-    infix fun <T : Any> State<T>.effect(effect: T.() -> Unit): Job = scope.launch {
-        this@effect.getMutableState().flow.collect(effect::invoke)
+    infix fun <T : Any> State<T>.effect(effect: T.() -> Unit): Disposable = stateLock.withLock {
+        this@effect.getMutableState().observe(effect::invoke)
     }
 
-    infix fun <T : Any> State<T>.repository(repository: Repository<T>) {
-        this.getMutableState().apply {
-            this@apply.repository = repository
-
+    infix fun <T : Any> State<T>.bridge(bridge: Bridge<T>) {
+        stateLock.withLock {
+            this.getMutableState().apply {
+                this@apply.bridge = bridge
+            }
         }
-
     }
 
     infix fun <T : Any> State<T>.mutate(that: T) {
-        val state = this.getMutableState()
-        val currentTransaction = activeTransaction.value
+        stateLock.withLock {
+            val state = this.getMutableState()
+            val currentTransaction = activeTransaction
 
-        // If we have an active transaction, record the change through the transaction's API
-        if (currentTransaction != null) {
-            runBlocking {  // Note: Using runBlocking since mutate is not suspend
+            if (currentTransaction != null) {
                 try {
                     currentTransaction.recordChange(state)
                 } catch (e: TransactionException) {
                     throw IllegalStateException("Failed to record state change in transaction", e)
                 }
             }
-        }
 
-        // Apply the new value
-        state.value = that
+            state.value = that
+        }
     }
 
     private fun <T : Any> State<T>.getMutableState(): MutableState<T> {
-        return this as? MutableState<T> ?: error("State must be created by this Vault instance")
+        return propertiesLock.withLock {
+            this as? MutableState<T> ?: error("State must be created by this Vault instance")
+        }
     }
-}
 
-suspend fun <T> Transaction.executeWithinTransaction(
-    block: suspend Transaction.() -> T
-): Result<T> = try {
-    Result.success(block()).also {
-        commit()
+    fun getState(name: String): State<*>? = propertiesLock.withLock {
+        _properties[name]
     }
-} catch (e: Exception) {
-    rollback()
-    Result.failure(e)
+
+    fun hasState(name: String): Boolean = propertiesLock.withLock {
+        _properties.containsKey(name)
+    }
+
+    fun removeState(name: String) {
+        propertiesLock.withLock {
+            _properties.remove(name)
+        }
+    }
+
+    fun clearStates() {
+        propertiesLock.withLock {
+            _properties.clear()
+        }
+    }
 }

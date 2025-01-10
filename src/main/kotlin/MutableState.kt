@@ -1,77 +1,84 @@
 package com.vynatix
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
-import java.time.Instant
-import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.locks.ReentrantReadWriteLock
-import kotlin.concurrent.withLock
 
-
-interface StateValidator<T : Any> {
-    fun validate(value: T): Boolean
-    fun getValidationError(value: T): String?
-}
-
-
-class StateValidationException(message: String) : Exception(message)
 
 class MutableState<T : Any>(
     initialValue: T,
-    scope: CoroutineScope,
-    private val validator: StateValidator<T>? = null,
+    private val transformer: Transformer<T>? = null
 ) : State<T> {
-    private val stateRef = AtomicReference(initialValue)
-    private val stateFlow = MutableStateFlow(initialValue)
-    private val writeLock = ReentrantReadWriteLock()
-    private val lastModifiedTime = AtomicReference(Instant.now())
+    private val stateLock = VaultLock()
+    private val observersLock = VaultLock()
+    private val bridgeLock = VaultLock()
+
+    private val observers = mutableSetOf<(T) -> Unit>()
+    @Volatile private var _value: T = initialValue
+    @Volatile private var _repository: Bridge<T>? = null
 
     override var value: T
-        get() = stateRef.get()
-        set(newValue) {
-            validateState(newValue)
-            updateState(newValue)
-        }
+        get() = stateLock.withLock { afterGet(_value) }
+        set(newValue) = stateLock.withLock { updateState(newValue, true) }
 
-    var repository: Repository<T>? = null
-        set(value) {
-            field = value
-            value?.transmitted {
-                updateState(it)
+    private fun afterGet(rawValue: T): T = stateLock.withLock {
+        transformer?.takeIf { it.shouldTransform(rawValue) }
+            ?.get(rawValue) ?: rawValue
+    }
+
+    private fun beforeSet(newValue: T): T = stateLock.withLock {
+        transformer?.takeIf { it.shouldTransform(newValue) }
+            ?.set(newValue) ?: newValue
+    }
+
+    private fun updateState(newValue: T, notifyRepository: Boolean) {
+        stateLock.withLock {
+            val processedValue = beforeSet(newValue)
+            _value = processedValue
+
+            // Notify observers under observer lock
+            observersLock.withLock {
+                notifyObservers(processedValue)
             }
-        }
 
-    init {
-        scope.launch {
-            stateFlow.collect { value ->
-                    repository?.received(value)
+            // Notify repository if needed under bridge lock
+            if (notifyRepository) {
+                bridgeLock.withLock {
+                    _repository?.publish(processedValue)
                 }
-        }
-    }
-
-    val flow: StateFlow<T> = stateFlow.asStateFlow()
-
-    private fun validateState(newValue: T) {
-        validator?.let { validator ->
-            if (!validator.validate(newValue)) {
-                throw StateValidationException(
-                    validator.getValidationError(newValue) ?: "Invalid state"
-                )
             }
         }
     }
 
-    private fun updateState(newValue: T) {
-        writeLock.writeLock().withLock {
-            validateState(newValue)
-            val oldValue = stateRef.get()
-            stateRef.set(newValue)
-            stateFlow.value = newValue
-            lastModifiedTime.set(Instant.now())
+    private fun notifyObservers(value: T) = observersLock.withLock {
+        // Create a snapshot of observers to reduce lock holding time
+        val currentObservers = observers.toSet()
+        currentObservers.forEach { observer ->
+            try {
+                observer(value)
+            } catch (e: Exception) {
+                // Handle observer notification failure
+                // Could add error handling strategy here
+            }
         }
     }
-}
 
+    fun observe(observer: (T) -> Unit): Disposable = observersLock.withLock {
+        observers.add(observer)
+        // Initial notification with current value
+        val currentValue = stateLock.withLock { _value }
+        observer(currentValue)
+
+        return Disposable {
+            observersLock.withLock {
+                observers.remove(observer)
+            }
+        }
+    }
+
+    var bridge: Bridge<T>?
+        get() = bridgeLock.withLock { _repository }
+        set(value) = bridgeLock.withLock {
+            _repository = value
+            value?.observe { receivedValue ->
+                updateState(receivedValue, false)
+            }
+        }
+}

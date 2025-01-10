@@ -21,7 +21,7 @@ open class Middleware<T : Vault<T>> {
     operator fun invoke(vault: T, next: () -> Unit) {
         val context = MiddlewareContext(
             vault = vault,
-            transaction = vault.activeTransaction.value ?: error("No active transaction")
+            transaction = vault.activeTransaction ?: error("No active transaction")
         )
         execute(context, next)
     }

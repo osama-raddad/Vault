@@ -2,14 +2,15 @@ package com.vynatix
 
 import kotlin.reflect.KProperty
 
-fun interface Transmitter<T : Any> {
-    fun transmitted(observer: (T) -> Unit): Boolean
+fun interface Observable<T : Any> {
+    fun observe(observer: (T) -> Unit): Disposable
 }
 
-fun interface Receiver<T : Any> {
-    fun received(value: T): Boolean
+fun interface Publisher<T : Any> {
+    fun publish(value: T): Boolean
 }
-interface Repository<T : Any> : Transmitter<T>, Receiver<T>
+
+interface Bridge<T : Any> : Observable<T>, Publisher<T>
 fun interface Initializer<T : Any> : () -> T
 interface State<T : Any> {
     val value: T
@@ -21,6 +22,19 @@ fun interface Effect<T : Any> : (T) -> Unit
 
 fun interface StateDelegate<T : Any> {
     operator fun getValue(thisRef: Any?, property: KProperty<*>): State<T>
+}
+
+
+interface Transformer<T : Any> {
+    fun set(value: T): T
+
+    fun get(value: T): T
+
+    fun shouldTransform(value: T): Boolean = true
+}
+
+fun interface Disposable {
+    fun dispose()
 }
 
 

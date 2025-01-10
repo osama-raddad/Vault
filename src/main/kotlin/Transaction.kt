@@ -1,7 +1,5 @@
 package com.vynatix
 
-import kotlinx.coroutines.flow.MutableStateFlow
-
 @JvmInline
 value class Timestamp private constructor(private val millisSinceEpoch: Long) {
     companion object {
@@ -11,29 +9,37 @@ value class Timestamp private constructor(private val millisSinceEpoch: Long) {
     override fun toString(): String = millisSinceEpoch.toString()
 }
 
-class Transaction(var id: String) {
+class Transaction(val id: String) {
+    private val statusLock = VaultLock()
+    private val endTimeLock = VaultLock()
+    private val propertiesLock = VaultLock()
+    private val valuesLock = VaultLock()
+
+    @Volatile
+    private var _status = TransactionStatus.Active
+    val status: TransactionStatus
+        get() = statusLock.withLock { _status }
+
+    @Volatile
+    private var _endTime: String? = null
+    val endTime: String?
+        get() = endTimeLock.withLock { _endTime }
+
     private val _modifiedProperties = mutableSetOf<State<out Any>>()
     private val _previousValues = mutableMapOf<State<out Any>, Any>()
 
-    private val propertiesLock = Any()
-    private val valuesLock = Any()
-
     val modifiedProperties: Set<State<out Any>>
-        get() = synchronized(propertiesLock) { _modifiedProperties.toSet() }
+        get() = propertiesLock.withLock { _modifiedProperties.toSet() }
 
     val previousValues: Map<State<out Any>, Any>
-        get() = synchronized(valuesLock) { _previousValues.toMap() }
-
-    private val _status = MutableStateFlow(TransactionStatus.Active)
-
-
-    private val _endTime = MutableStateFlow<String?>(null)
+        get() = valuesLock.withLock { _previousValues.toMap() }
 
     fun <T : Any> recordChange(state: State<T>) {
-        synchronized(propertiesLock) {
-            synchronized(valuesLock) {
+        propertiesLock.withLock {
+            valuesLock.withLock {
                 if (state !in _modifiedProperties) {
-                    _previousValues[state] = state.value
+                    val currentValue = state.value
+                    _previousValues[state] = currentValue
                     _modifiedProperties.add(state)
                 }
             }
@@ -42,8 +48,9 @@ class Transaction(var id: String) {
 
     fun rollback() {
         try {
-            synchronized(propertiesLock) {
-                synchronized(valuesLock) {
+            propertiesLock.withLock {
+                valuesLock.withLock {
+                    // Create snapshots to minimize lock duration
                     val propertiesToRestore = _modifiedProperties.toSet()
                     val previousValuesCopy = _previousValues.toMap()
 
@@ -51,7 +58,14 @@ class Transaction(var id: String) {
                         @Suppress("UNCHECKED_CAST")
                         (state as? MutableState<Any>)?.let { mutableState ->
                             previousValuesCopy[state]?.let { previousValue ->
-                                mutableState.value = previousValue
+                                try {
+                                    mutableState.value = previousValue
+                                } catch (e: Exception) {
+                                    throw TransactionException(
+                                        "Failed to restore state during rollback: ${state::class.simpleName}",
+                                        e
+                                    )
+                                }
                             }
                         }
                     }
@@ -63,29 +77,64 @@ class Transaction(var id: String) {
             updateStatus(TransactionStatus.Failed)
             throw TransactionException("Rollback failed", e)
         } finally {
-            _endTime.value = Timestamp.now().toString()
+            endTimeLock.withLock {
+                _endTime = Timestamp.now().toString()
+            }
         }
     }
 
     fun commit() {
         try {
-            synchronized(propertiesLock) {
-                updateStatus(TransactionStatus.Committed)
+            statusLock.withLock {
+                if (_status != TransactionStatus.Active) {
+                    throw TransactionException("Cannot commit transaction in ${_status} state")
+                }
+
+                propertiesLock.withLock {
+                    // Verify all modified properties are still valid
+                    _modifiedProperties.forEach { state ->
+                        if (state !is MutableState<*>) {
+                            throw TransactionException("Invalid state modification detected during commit")
+                        }
+                    }
+
+                    updateStatus(TransactionStatus.Committed)
+                }
             }
         } catch (e: Exception) {
             updateStatus(TransactionStatus.Failed)
             throw TransactionException("Commit failed", e)
         } finally {
-            _endTime.value = Timestamp.now().toString()
+            endTimeLock.withLock {
+                _endTime = Timestamp.now().toString()
+            }
         }
     }
 
     private fun updateStatus(newStatus: TransactionStatus) {
-        _status.value = newStatus
+        statusLock.withLock {
+            val oldStatus = _status
+            if (!isValidStatusTransition(oldStatus, newStatus)) {
+                throw TransactionException("Invalid status transition from $oldStatus to $newStatus")
+            }
+            _status = newStatus
+        }
+    }
+
+    private fun isValidStatusTransition(from: TransactionStatus, to: TransactionStatus): Boolean {
+        return when (from) {
+            TransactionStatus.Active -> to in setOf(
+                TransactionStatus.Committed,
+                TransactionStatus.RolledBack,
+                TransactionStatus.Failed
+            )
+            TransactionStatus.Committed -> false
+            TransactionStatus.RolledBack -> false
+            TransactionStatus.Failed -> false
+        }
     }
 }
 
-// Transaction status enum to track lifecycle
 enum class TransactionStatus {
     Active,
     Committed,
@@ -93,15 +142,23 @@ enum class TransactionStatus {
     Failed
 }
 
-// Custom exception for transaction-related errors
 class TransactionException(
     message: String,
     cause: Throwable? = null
 ) : Exception(message, cause)
 
-// Extension function to execute code within a transaction and handle results
-
 sealed class TransactionResult {
     data class Success(val transaction: Transaction) : TransactionResult()
     data class Error(val exception: Throwable, val transaction: Transaction) : TransactionResult()
+}
+
+fun <T> Transaction.executeWithinTransaction(
+    block: Transaction.() -> T
+): Result<T> = try {
+    Result.success(block()).also {
+        commit()
+    }
+} catch (e: Exception) {
+    rollback()
+    Result.failure(e)
 }
