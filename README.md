@@ -1,189 +1,277 @@
-# Vault: Making State Management Natural in Kotlin Multiplatform
+# Vault
 
-[![Kotlin](https://img.shields.io/badge/kotlin-1.9.0-blue.svg)](http://kotlinlang.org)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+A powerful, transactional state management library for Kotlin Multiplatform applications that provides ACID guarantees for application state.
 
-Imagine building applications where state management feels as natural as having a conversation – where every state change is predictable, every data transformation is automatic, and every side effect is controlled. This is what Vault brings to Kotlin Multiplatform development.
+## Table of Contents
+1. [Introduction](#introduction)
+2. [Installation](#installation)
+3. [Core Concepts](#core-concepts)
+4. [Advanced Topics](#advanced-topics)
+5. [Best Practices](#best-practices)
+6. [API Reference](#api-reference)
+7. [Performance Guidelines](#performance-guidelines)
+8. [Testing](#testing)
+9. [FAQ](#faq)
 
-## The State Management Challenge
+## Introduction
 
-Think about the last time you dealt with these common scenarios in your applications:
+Vault is a type-safe, transaction-based state management library designed specifically for Kotlin Multiplatform applications. It provides ACID (Atomicity, Consistency, Isolation, Durability) guarantees while maintaining high performance through lockless architecture.
 
-- A user is halfway through a multi-step form when an error occurs. How do you ensure their data isn't partially saved?
-- Your application needs to sync settings across multiple screens. How do you keep everything consistent?
-- You're handling real-time updates while processing user input. How do you prevent race conditions?
+### Key Features
 
-These challenges arise because state management in modern applications is inherently complex. Vault transforms these complexities into simple, intuitive patterns that feel natural to Kotlin developers.
+- 🔒 **ACID Transactions**: Ensures data consistency with automatic rollback support
+- 🔐 **Type-safe State Management**: Leverages Kotlin's type system for compile-time safety
+- 🔄 **Effect System**: Clean side-effect management with automatic cleanup
+- 🌉 **Bridge Pattern**: Bi-directional state synchronization
+- 🎯 **Middleware System**: Extensible architecture for cross-cutting concerns
+- 🚀 **High Performance**: Lock-free concurrency with sophisticated conflict resolution
 
-## A Fresh Approach to State Management
+## Installation
 
-Let's explore how Vault makes state management both powerful and intuitive through its core concepts.
-
-### The Power of Type-Safe State
-
-Imagine your application's state as a well-organized filing cabinet where every document has its proper place and format. Vault creates this structure through type-safe state containers:
+Add to your `build.gradle.kts`:
 
 ```kotlin
-object UserManager : Vault<UserManager>() {
-    // States are like labeled drawers in your filing cabinet
-    val profile by state { 
-        UserProfile(
-            name = "",
-            email = "",
-            preferences = UserPreferences()
-        )
-    }
-    
-    // Each drawer ensures its contents are always valid
-    val sessionStatus by state { SessionStatus.LOGGED_OUT }
-    val lastActive by state { Clock.System.now() }
+dependencies {
+    implementation("com.vynatix:vault:1.0.0")
 }
 ```
 
-This type safety isn't just about preventing errors – it's about making your code self-documenting and maintainable. The compiler becomes your first line of defense against state-related bugs.
+## Core Concepts
 
-### Transactions: Your Safety Net
+### State
 
-Think of transactions like a choreographed dance where every step must be perfect, or the whole sequence starts over. Vault ensures your state changes follow this all-or-nothing principle:
+States are the fundamental building blocks in Vault. They represent immutable, type-safe data containers.
 
 ```kotlin
-fun login(credentials: Credentials) = UserManager action {
-    // All these changes succeed together or fail together
-    profile mutate fetchUserProfile(credentials)
-    sessionStatus mutate SessionStatus.ACTIVE
-    lastActive mutate Clock.System.now()
-    
-    // If anything fails, everything automatically reverts
-    // No partial updates, no inconsistent state
+object UserVault : Vault<UserVault>() {
+    val profile by state { Profile("", "", 0, "") }
+    val followers by state { 0 }
+    val posts by state { emptyList<Post>() }
 }
 ```
 
-This transactional approach means you can focus on describing what should happen, while Vault handles the complexities of making it happen safely.
+### Actions
 
-### Transformers: Your Data Quality Guardians
-
-Consider how a spell-checker automatically corrects text as you type. Vault's transformers work similarly, automatically cleaning and validating your data:
+Actions provide atomic state mutations with automatic rollback on failure.
 
 ```kotlin
-class ProfileTransformer : Transformer<UserProfile> {
-    override fun set(value: UserProfile): UserProfile {
-        return value.copy(
-            name = value.name.trim(),
-            email = value.email.trim().lowercase(),
-            // Ensure phone numbers are consistently formatted
-            phone = value.phone.replace(Regex("[^0-9+]"), "")
-        )
-    }
+fun updateProfile(newProfile: Profile) = action {
+    profile mutate newProfile
 }
-
-// Every profile update now automatically ensures data quality
-val profile by state(ProfileTransformer()) { UserProfile() }
 ```
 
-### Effects: Controlled Reactions to Change
+### Effects
 
-Effects in Vault are like setting up smart notifications that automatically handle themselves. They make managing side effects as simple as describing what should happen:
+Effects handle side-effects reactively based on state changes.
 
 ```kotlin
-class UserPresenter {
-    private var cleanup: Disposable? = null
+profile effect { 
+    println("Profile updated: $it")
+}
+```
+
+### Transformers
+
+Transformers validate and modify state values during mutations.
+
+```kotlin
+class ProfileCleaner : Transformer<Profile> {
+    override fun set(value: Profile): Profile = value.copy(
+        name = value.name.trim(),
+        email = value.email.trim()
+    )
     
-    fun start() {
-        // Automatically respond to user status changes
-        cleanup = UserManager.sessionStatus effect { status ->
-            when (status) {
-                SessionStatus.ACTIVE -> {
-                    refreshUserInterface()
-                    startHeartbeat()
-                }
-                SessionStatus.LOGGED_OUT -> {
-                    clearInterface()
-                    stopHeartbeat()
-                }
-            }
-        }
-    }
-    
-    fun stop() {
-        // Clean up is straightforward
-        cleanup?.dispose()
+    override fun get(value: Profile): Profile = value
+}
+```
+
+### Middleware
+
+Middleware intercepts transactions for cross-cutting concerns.
+
+```kotlin
+class LoggingMiddleware : Middleware<UserVault>() {
+    override fun onTransactionStarted(context: MiddlewareContext<UserVault>) {
+        println("Transaction started: ${context.transaction.id}")
     }
 }
 ```
 
-### Thread Safety That Just Works
+## Advanced Topics
 
-Modern applications are inherently concurrent, but managing thread safety shouldn't be your daily concern. Vault's sophisticated locking system handles this automatically:
+### Transaction Management
+
+Transactions in Vault provide:
+
+- Atomic state mutations
+- Automatic rollback on failure
+- State change tracking
+- Transaction metadata
 
 ```kotlin
-// This code is automatically thread-safe
-UserManager action {
-    // Concurrent access is handled transparently
-    profile mutate updatedProfile
-    lastActive mutate Clock.System.now()
-}
-```
-
-The system provides fine-grained locking, deadlock prevention, and efficient read operations without you having to think about the details.
-
-## Real Applications, Real Solutions
-
-Vault shines in real-world scenarios where state management complexity typically creates challenges:
-
-### Form Management
-```kotlin
-object FormManager : Vault<FormManager>() {
-    val formData by state { FormData() }
-    val validation by state { ValidationState() }
-    val submitStatus by state { SubmitStatus.READY }
+val result = vault action {
+    profile mutate newProfile
+    followers mutate newFollowerCount
     
-    // All form operations are automatically transactional
-    fun submit() = action {
-        submitStatus mutate SubmitStatus.SUBMITTING
-        try {
-            val result = submitToServer(formData.value)
-            formData mutate FormData() // Clear on success
-            submitStatus mutate SubmitStatus.COMPLETED
-        } catch (e: Exception) {
-            submitStatus mutate SubmitStatus.FAILED
-            // Original form data is preserved
-        }
+    if (someCondition) {
+        throw RuntimeException("Rollback all changes")
     }
 }
 ```
 
-### Real-time Updates
+### Bridges
+
+Bridges enable bi-directional state synchronization:
+
 ```kotlin
-object ChatManager : Vault<ChatManager>() {
-    val messages by state { listOf<Message>() }
-    val connectionStatus by state { ConnectionStatus.DISCONNECTED }
-    
-    // Real-time updates are safely handled
-    fun connect() = action {
-        connectionStatus mutate ConnectionStatus.CONNECTING
-        startWebSocket { message ->
-            action {
-                messages mutate (messages.value + message)
-            }
-        }
+loggedIn.bridge(object : Bridge<Boolean> {
+    private val observers = mutableListOf<(Boolean) -> Unit>()
+    private var value: Boolean? = null
+
+    override fun observe(observer: (Boolean) -> Unit): Disposable {
+        value?.let(observer)
+        observers.add(observer)
+        return Disposable { observers.remove(observer) }
     }
+
+    override fun publish(value: Boolean): Boolean {
+        this.value = value
+        observers.forEach { it(value) }
+        return true
+    }
+})
+```
+
+### Lock-Free Concurrency
+
+Vault uses a sophisticated lock-free architecture for high performance:
+
+- Custom `VaultLock` implementation
+- Reentrant locking support
+- Automatic deadlock prevention
+- Optimistic concurrency control
+
+## Best Practices
+
+1. **State Design**
+   - Keep states granular and focused
+   - Use transformers for validation
+   - Clean up disposables
+   - Handle errors appropriately
+
+2. **Transaction Management**
+   - Keep transactions atomic and focused
+   - Use proper error handling
+   - Clean up resources
+   - Monitor transaction performance
+
+3. **Middleware Usage**
+   - Keep middleware focused on cross-cutting concerns
+   - Handle errors gracefully
+   - Monitor middleware performance
+   - Clean up resources
+
+4. **Testing**
+   - Test all state transitions
+   - Verify rollback behavior
+   - Test concurrent access
+   - Validate transformers
+   
+## Performance Guidelines
+
+1. **Lock Management**
+   - Minimize lock duration
+   - Use appropriate granularity
+   - Monitor lock contention
+   - Handle lock timeouts
+
+2. **Transaction Optimization**
+   - Keep transactions short
+   - Batch operations when appropriate
+   - Monitor transaction performance
+   - Use appropriate isolation levels
+
+3. **Resource Management**
+   - Clean up disposables
+   - Monitor memory usage
+   - Handle resource leaks
+   - Use appropriate pooling
+
+## Testing
+
+Vault provides comprehensive testing support through its `TestVault` implementation:
+
+```kotlin
+class TestVault : Vault<TestVault>() {
+    val counter by state { 0 }
+    val text by state { "" }
+    val list by state { listOf<Int>() }
+}
+
+class StressTestRunner(
+    private val iterations: Int = 100000,
+    private val concurrentVaults: Int = 50,
+    private val complexOperations: Boolean = true
+) {
+    // Stress testing implementation
 }
 ```
 
-## Experience the Difference
+## FAQ
 
-Vault brings clarity and confidence to state management in Kotlin Multiplatform applications. It transforms complex state management challenges into straightforward, maintainable solutions that just work.
+### Q: How does Vault handle concurrent modifications?
+A: Vault uses a lock-free architecture with optimistic concurrency control. Each state has its own lock, and transactions are automatically rolled back on conflicts.
 
-Start building better applications today with Vault – where state management feels natural, and you can focus on creating great features for your users.
+### Q: What happens if a transaction fails?
+A: All state changes within a failed transaction are automatically rolled back to their previous values.
 
-## Contributing
+### Q: Can I use Vault in a multiplatform project?
+A: Yes, Vault is designed for Kotlin Multiplatform and works across all supported platforms.
 
-Join us in making state management better for everyone. See our [Contributing Guide](CONTRIBUTING.md) for details.
+### Q: How does Vault handle memory management?
+A: Vault uses proper resource cleanup through disposables and automatic transaction cleanup.
 
-## License
+## API Reference
 
-Vault is released under the Apache 2.0 license. See [LICENSE](LICENSE) for details.
+### Core Classes
 
----
+#### Vault
+The base class for all vault implementations:
+```kotlin
+abstract class Vault<Self : Vault<Self>> {
+    fun middlewares(vararg middleware: Middleware<Self>)
+    fun action(action: Self.() -> Unit): TransactionResult
+    fun <T : Any> state(transformer: Transformer<T>? = null, initialize: Initializer<T>)
+}
+```
 
-*Created by developers who believe state management should be a joy, not a chore.*
+#### State
+Represents an immutable state container:
+```kotlin
+interface State<T : Any> {
+    val value: T
+}
+```
+
+#### Transaction
+Handles atomic state mutations:
+```kotlin
+class Transaction(val id: String) {
+    val status: TransactionStatus
+    val modifiedProperties: Set<State<out Any>>
+    fun rollback()
+    fun commit()
+}
+```
+
+#### Middleware
+Intercepts transaction lifecycle events:
+```kotlin
+open class Middleware<T : Vault<T>> {
+    fun onTransactionStarted(context: MiddlewareContext<T>)
+    fun onTransactionCompleted(context: MiddlewareContext<T>)
+    fun onTransactionError(context: MiddlewareContext<T>, error: Throwable)
+}
+```
+
+For more details, please refer to the API documentation or the source code.
