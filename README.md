@@ -20,8 +20,8 @@ Vault is a type-safe, transaction-based state management library designed specif
 ### Key Features
 
 - 🔒 **ACID Transactions**
-- 🔄 **Effect System**
-- 🌉 **Bi-directional state**: 
+- 🔄 **Side Effect System**
+- 🌉 **Bi-directional state**
 - 🎯 **Middleware System**
 - 🚀 **Lock-free concurrency**
 
