@@ -19,12 +19,11 @@ Vault is a type-safe, transaction-based state management library designed specif
 
 ### Key Features
 
-- 🔒 **ACID Transactions**: Ensures data consistency with automatic rollback support
-- 🔐 **Type-safe State Management**: Leverages Kotlin's type system for compile-time safety
-- 🔄 **Effect System**: Clean side-effect management with automatic cleanup
-- 🌉 **Bridge Pattern**: Bi-directional state synchronization
-- 🎯 **Middleware System**: Extensible architecture for cross-cutting concerns
-- 🚀 **High Performance**: Lock-free concurrency with sophisticated conflict resolution
+- 🔒 **ACID Transactions**
+- 🔄 **Effect System**
+- 🌉 **Bi-directional state**: 
+- 🎯 **Middleware System**
+- 🚀 **Lock-free concurrency**
 
 ## Installation
 
@@ -67,21 +66,6 @@ Effects handle side-effects reactively based on state changes.
 ```kotlin
 profile effect { 
     println("Profile updated: $it")
-}
-```
-
-### Transformers
-
-Transformers validate and modify state values during mutations.
-
-```kotlin
-class ProfileCleaner : Transformer<Profile> {
-    override fun set(value: Profile): Profile = value.copy(
-        name = value.name.trim(),
-        email = value.email.trim()
-    )
-    
-    override fun get(value: Profile): Profile = value
 }
 ```
 
